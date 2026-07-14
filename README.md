@@ -1,2 +1,17 @@
-# GK-Ice-Cube-POS
-A modern Point of Sale (POS) and Inventory Management System developed for GK Ice Cube. It streamlines daily ice production tracking, sales management, inventory monitoring, and profit calculation through a simple and intuitive web interface.
+GK Ice Cube - Point of Sale & Inventory Management System
+
+A custom web-based Point of Sale (POS) and Inventory Management System developed for GK Ice Cube. The system simplifies daily business operations by managing ice production, tracking inventory, recording sales, and generating financial reports.
+
+Features
+📦 Record and monitor daily ice production
+📊 Track available inventory and carryover stock
+💰 Record Pickup and Delivery sales transactions
+⚙️ Configure pricing and production costs
+📈 Automatically calculate revenue, production costs, and net profit
+📅 View Daily, Weekly, and Monthly reports
+🚨 Prevent sales that exceed available inventory
+Tech Stack
+Frontend: React 19, Vite
+Backend & Database: Supabase (PostgreSQL)
+Styling: Custom CSS
+Libraries: Lucide React, date-fns
