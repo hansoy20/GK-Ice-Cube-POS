@@ -1,20 +1,16 @@
-# 🧊 GK Ice Cube — POS & Inventory Management System
+# React + Vite
 
-A web-based Point of Sale (POS) and Inventory Management System built for GK Ice Cube. It simplifies daily operations by managing ice production, tracking inventory, recording sales, and generating financial reports.
+This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
-## Features
+Currently, two official plugins are available:
 
-- 🧊 Record and monitor daily ice production
-- 📊 Track available inventory and carryover stock
-- 💰 Record Pickup and Delivery sales transactions
-- ⚙️ Configure pricing and production costs
-- 📈 Automatically calculate revenue, production costs, and net profit
-- 📅 View Daily, Weekly, and Monthly reports
-- 🚫 Prevent sales that exceed available inventory
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
-## Tech Stack
+## React Compiler
 
-- **Frontend:** React 19, Vite
-- **Backend & Database:** Supabase (PostgreSQL)
-- **Styling:** Custom CSS
-- **Libraries:** Lucide React, date-fns
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+
+## Expanding the Oxlint configuration
+
+If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
