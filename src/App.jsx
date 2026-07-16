@@ -5,7 +5,7 @@ import {
   startOfMonth, endOfMonth, addMonths, subMonths,
   eachDayOfInterval
 } from 'date-fns';
-import { Settings as SettingsIcon, ChevronLeft, ChevronRight, Plus, Trash2, AlertCircle, ChevronDown, ChevronUp, WifiOff } from 'lucide-react';
+import { Settings as SettingsIcon, ChevronLeft, ChevronRight, Plus, Trash2, AlertCircle, ChevronDown, ChevronUp, WifiOff, Download, LogOut } from 'lucide-react';
 import { supabase } from './supabase';
 import './index.css';
 
@@ -24,6 +24,12 @@ function App() {
   const [isSavingSale, setIsSavingSale] = useState(false);
   const [isSavingProd, setIsSavingProd] = useState(false);
   const [error, setError] = useState(null);
+
+  // Auth states
+  const [session, setSession] = useState(null);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
 
   // Form states
   const [saleKg, setSaleKg] = useState('');
@@ -46,12 +52,31 @@ function App() {
 
   // Fetch data
   useEffect(() => {
-    fetchSettings();
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setIsAuthLoading(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   useEffect(() => {
-    fetchPeriodData(startDate, endDate);
-  }, [startDate.toISOString(), endDate.toISOString(), viewMode]);
+    if (session) {
+      fetchSettings();
+    }
+  }, [session]);
+
+  useEffect(() => {
+    if (session) {
+      fetchPeriodData(startDate, endDate);
+    }
+  }, [startDate.toISOString(), endDate.toISOString(), viewMode, session]);
 
   const fetchSettings = async () => {
     try {
@@ -279,6 +304,133 @@ function App() {
     }).filter(Boolean); 
   };
 
+  const triggerDownload = (csvContent, fileName) => {
+    // Add BOM for Excel UTF-8 support to correctly render the Peso sign
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    if (link.download !== undefined) {
+      const url = URL.createObjectURL(blob);
+      link.setAttribute('href', url);
+      link.setAttribute('download', fileName);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+  };
+
+  const handleExportDetailed = async () => {
+    try {
+      // Fetch all historical records to allow backtracking everything
+      const { data: allSales, error: salesErr } = await supabase.from('sales_entries').select('*');
+      const { data: allProd, error: prodErr } = await supabase.from('production_entries').select('*');
+      if (salesErr) throw salesErr;
+      if (prodErr) throw prodErr;
+
+      const headers = ['Date', 'Time', 'Type', 'Amount (kg)', 'Revenue/Cost', 'Price per kg'];
+      const rows = [];
+      
+      const combined = [
+        ...(allSales || []).map(s => ({ ...s, _sortDate: new Date(s.created_at), _type: 'sale' })),
+        ...(allProd || []).map(p => ({ ...p, _sortDate: new Date(p.created_at), _type: 'production' }))
+      ].sort((a, b) => b._sortDate - a._sortDate);
+
+      combined.forEach(entry => {
+        const date = format(entry._sortDate, 'yyyy-MM-dd');
+        const time = format(entry._sortDate, 'hh:mm a');
+        if (entry._type === 'sale') {
+          rows.push([date, time, `Sale (${entry.sale_type})`, `-${entry.kg}`, `₱${entry.revenue}`, `₱${entry.price_per_kg}`]);
+        } else {
+          rows.push([date, time, 'Production', `+${entry.kg_produced}`, '-', '-']);
+        }
+      });
+
+      const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+      triggerDownload(csvContent, `IceCube_All_Detailed_Records.csv`);
+    } catch (err) {
+      console.error("Export error", err);
+      setError("Failed to export detailed records.");
+    }
+  };
+
+  const handleExportSummary = async () => {
+    try {
+      // Fetch all historical records
+      const { data: allSales, error: salesErr } = await supabase.from('sales_entries').select('*');
+      const { data: allProd, error: prodErr } = await supabase.from('production_entries').select('*');
+      if (salesErr) throw salesErr;
+      if (prodErr) throw prodErr;
+
+      const safeSales = allSales || [];
+      const safeProd = allProd || [];
+
+      if (!safeSales.length && !safeProd.length) {
+        setError("No records to export.");
+        return;
+      }
+      
+      const allDates = [
+        ...safeSales.map(s => new Date(s.date)), 
+        ...safeProd.map(p => new Date(p.date))
+      ];
+      
+      const minDate = new Date(Math.min(...allDates));
+      const maxDate = new Date(Math.max(...allDates));
+      
+      const days = eachDayOfInterval({ start: minDate, end: maxDate }).reverse();
+      
+      const aggregate = days.map(day => {
+        const dateStr = format(day, 'yyyy-MM-dd');
+        const daySales = safeSales.filter(s => s.date === dateStr);
+        const dayProd = safeProd.filter(p => p.date === dateStr);
+        const pTotal = dayProd.reduce((acc, p) => acc + Number(p.kg_produced), 0);
+        const sTotal = daySales.reduce((acc, s) => acc + Number(s.kg), 0);
+        const rev = daySales.reduce((acc, s) => acc + Number(s.revenue), 0);
+        const cost = daySales.reduce((acc, s) => acc + (Number(s.kg) * Number(s.cost_per_kg)), 0);
+        const prof = rev - cost;
+        if (pTotal === 0 && sTotal === 0) return null; 
+        return { date: day, produced: pTotal, sold: sTotal, revenue: rev, profit: prof };
+      }).filter(Boolean);
+
+      const headers = ['Date', 'Produced (kg)', 'Sold (kg)', 'Revenue', 'Profit'];
+      const rows = aggregate.map(row => {
+        return [
+          format(row.date, 'yyyy-MM-dd'),
+          row.produced,
+          row.sold,
+          `₱${row.revenue}`,
+          `₱${row.profit}`
+        ];
+      });
+
+      const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+      triggerDownload(csvContent, `IceCube_All_Summary_Records.csv`);
+    } catch (err) {
+      console.error("Export error", err);
+      setError("Failed to export summary records.");
+    }
+  };
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setIsAuthLoading(true);
+    setError(null);
+    const { error: err } = await supabase.auth.signInWithPassword({
+      email: authEmail,
+      password: authPassword,
+    });
+    if (err) {
+      setError(err.message);
+      setIsAuthLoading(false);
+    } else {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+  };
+
   const renderDateLabel = () => {
     if (viewMode === 'daily') {
       return isSameDay(selectedDate, new Date()) ? 'Today' : format(selectedDate, 'MMM d, yyyy');
@@ -288,6 +440,49 @@ function App() {
       return format(startDate, 'MMMM yyyy');
     }
   };
+
+  if (isAuthLoading) {
+    return <div className="container" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', color: 'var(--text-secondary)' }}>Loading...</div>;
+  }
+
+  if (!session) {
+    return (
+      <div className="container" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
+        <form className="card" onSubmit={handleLogin} style={{ width: '100%', maxWidth: '400px', border: '2px solid var(--primary-color)' }}>
+          <div className="card-header" style={{ textAlign: 'center', color: 'var(--primary-color)' }}>Ice Cube POS Login</div>
+          {error && (
+            <div className="warning-banner" style={{ backgroundColor: '#fef2f2', color: '#dc2626', marginBottom: '16px' }}>
+              <AlertCircle size={20} />
+              {error}
+            </div>
+          )}
+          <div className="form-group">
+            <label>Email</label>
+            <input 
+              type="email" 
+              className="form-control" 
+              value={authEmail}
+              onChange={(e) => setAuthEmail(e.target.value)}
+              required
+            />
+          </div>
+          <div className="form-group">
+            <label>Password</label>
+            <input 
+              type="password" 
+              className="form-control" 
+              value={authPassword}
+              onChange={(e) => setAuthPassword(e.target.value)}
+              required
+            />
+          </div>
+          <button type="submit" className="btn btn-primary" style={{ width: '100%', padding: '16px' }}>
+            Sign In
+          </button>
+        </form>
+      </div>
+    );
+  }
 
   return (
     <div className="container">
@@ -304,9 +499,11 @@ function App() {
             <ChevronRight size={20} />
           </button>
         </div>
-        <button className="btn btn-outline" onClick={() => setIsSettingsOpen(true)}>
-          <SettingsIcon size={20} />
-        </button>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <button className="btn btn-outline" onClick={() => setIsSettingsOpen(true)}>
+            <SettingsIcon size={20} />
+          </button>
+        </div>
       </header>
 
       {/* View Toggle */}
@@ -538,6 +735,19 @@ function App() {
           </ul>
         </section>
       )}
+
+      {/* Floating Actions */}
+      <div style={{ position: 'fixed', bottom: '20px', right: '20px', display: 'flex', flexDirection: 'column', gap: '10px', zIndex: 100 }}>
+        <button className="btn btn-outline" onClick={handleExportSummary} title="Export Summary to Excel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', backgroundColor: 'var(--bg-color)', boxShadow: 'var(--shadow-md)', width: '120px' }}>
+          <Download size={18} /> <span>Summary</span>
+        </button>
+        <button className="btn btn-outline" onClick={handleExportDetailed} title="Export Detailed Logs to Excel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', backgroundColor: 'var(--bg-color)', boxShadow: 'var(--shadow-md)', width: '120px' }}>
+          <Download size={18} /> <span>Detailed</span>
+        </button>
+        <button className="btn btn-outline" onClick={handleLogout} title="Log Out" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', color: 'var(--danger-color)', borderColor: 'var(--danger-color)', backgroundColor: 'var(--bg-color)', boxShadow: 'var(--shadow-md)', width: '120px' }}>
+          <LogOut size={18} /> <span>Logout</span>
+        </button>
+      </div>
 
       {/* Settings Modal */}
       {isSettingsOpen && (

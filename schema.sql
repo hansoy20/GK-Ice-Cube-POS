@@ -38,8 +38,7 @@ ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.sales_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.production_entries ENABLE ROW LEVEL SECURITY;
 
--- Create policies to allow all operations for anonymous users 
--- (Since this is a single-owner app with no auth for now, we just open it up to the API key)
-CREATE POLICY "Allow anon all on settings" ON public.settings FOR ALL USING (true);
-CREATE POLICY "Allow anon all on sales_entries" ON public.sales_entries FOR ALL USING (true);
-CREATE POLICY "Allow anon all on production_entries" ON public.production_entries FOR ALL USING (true);
+-- Create policies to require authentication
+CREATE POLICY "Allow authenticated all on settings" ON public.settings FOR ALL USING (auth.uid() IS NOT NULL);
+CREATE POLICY "Allow authenticated all on sales_entries" ON public.sales_entries FOR ALL USING (auth.uid() IS NOT NULL);
+CREATE POLICY "Allow authenticated all on production_entries" ON public.production_entries FOR ALL USING (auth.uid() IS NOT NULL);
