@@ -16,6 +16,7 @@ function App() {
   
   const [sales, setSales] = useState([]);
   const [production, setProduction] = useState([]);
+  const [expenses, setExpenses] = useState([]);
   const [carryover, setCarryover] = useState(0);
   
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -23,6 +24,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSavingSale, setIsSavingSale] = useState(false);
   const [isSavingProd, setIsSavingProd] = useState(false);
+  const [isSavingExpense, setIsSavingExpense] = useState(false);
   const [error, setError] = useState(null);
 
   // Auth states
@@ -34,7 +36,13 @@ function App() {
   // Form states
   const [saleKg, setSaleKg] = useState('');
   const [saleType, setSaleType] = useState('pickup');
+  const [saleCustomer, setSaleCustomer] = useState('');
+  const [salePaymentStatus, setSalePaymentStatus] = useState('paid');
+  const [salePaymentMethod, setSalePaymentMethod] = useState('cash');
+  
   const [prodKg, setProdKg] = useState('');
+  const [expenseDesc, setExpenseDesc] = useState('');
+  const [expenseAmount, setExpenseAmount] = useState('');
   const [settingsForm, setSettingsForm] = useState({ pickup_price: 8, delivery_price: 10, cost_per_kg: 0 });
 
   // Determine date range based on viewMode
@@ -119,24 +127,22 @@ function App() {
         .order('created_at', { ascending: false });
       if (prodErr) throw prodErr;
 
-      const { data: pastSalesData, error: pastSalesErr } = await supabase
-        .from('sales_entries')
-        .select('kg')
-        .lt('date', startStr);
-      if (pastSalesErr) throw pastSalesErr;
-        
-      const { data: pastProdData, error: pastProdErr } = await supabase
-        .from('production_entries')
-        .select('kg_produced')
-        .lt('date', startStr);
-      if (pastProdErr) throw pastProdErr;
+      const { data: expData, error: expErr } = await supabase
+        .from('expenses')
+        .select('*')
+        .gte('date', startStr)
+        .lte('date', endStr)
+        .order('created_at', { ascending: false });
+      if (expErr) throw expErr;
 
-      const pastSalesTotal = pastSalesData?.reduce((acc, row) => acc + Number(row.kg), 0) || 0;
-      const pastProdTotal = pastProdData?.reduce((acc, row) => acc + Number(row.kg_produced), 0) || 0;
-      
-      setCarryover(pastProdTotal - pastSalesTotal);
+      const { data: carryoverData, error: carryoverErr } = await supabase
+        .rpc('get_carryover_stock', { target_date: startStr });
+      if (carryoverErr) throw carryoverErr;
+
+      setCarryover(Number(carryoverData) || 0);
       setSales(salesData || []);
       setProduction(prodData || []);
+      setExpenses(expData || []);
     } catch (err) {
       console.error('Error fetching data:', err);
       setError(`Database Error: ${err.message || err.error_description || "Failed to load data."}`);
@@ -146,14 +152,19 @@ function App() {
   };
 
   // Calculations
+  const roundCurrency = (val) => Math.round(val * 100) / 100;
+
   const prodTotal = production.reduce((acc, curr) => acc + Number(curr.kg_produced), 0);
   const salesTotal = sales.reduce((acc, curr) => acc + Number(curr.kg), 0);
   const totalAvailableStock = carryover + prodTotal;
   const remainingStock = totalAvailableStock - salesTotal;
   
-  const revenueTotal = sales.reduce((acc, curr) => acc + Number(curr.revenue), 0);
-  const costTotal = sales.reduce((acc, curr) => acc + (Number(curr.kg) * Number(curr.cost_per_kg)), 0);
-  const profitTotal = revenueTotal - costTotal;
+  const revenueTotal = roundCurrency(sales.reduce((acc, curr) => acc + Number(curr.revenue), 0));
+  const unpaidTotal = roundCurrency(sales.filter(s => s.payment_status === 'unpaid').reduce((acc, curr) => acc + Number(curr.revenue), 0));
+  const collectedTotal = roundCurrency(revenueTotal - unpaidTotal);
+  const costTotal = roundCurrency(sales.reduce((acc, curr) => acc + (Number(curr.kg) * Number(curr.cost_per_kg)), 0));
+  const expensesTotal = roundCurrency(expenses.reduce((acc, curr) => acc + Number(curr.amount), 0));
+  const profitTotal = roundCurrency(revenueTotal - costTotal - expensesTotal);
 
   // Handlers
   const handlePrev = () => {
@@ -184,26 +195,37 @@ function App() {
     const price_per_kg = saleType === 'pickup' ? settings.pickup_price : settings.delivery_price;
     const revenue = kg * price_per_kg;
     
-    const newSale = {
-      date: format(selectedDate, 'yyyy-MM-dd'),
-      kg,
+    const rpcArgs = {
+      sale_date: format(selectedDate, 'yyyy-MM-dd'),
+      sale_kg: kg,
       sale_type: saleType,
-      price_per_kg,
-      cost_per_kg: settings.cost_per_kg,
-      revenue
+      sale_price_per_kg: price_per_kg,
+      sale_cost_per_kg: settings.cost_per_kg,
+      sale_revenue: revenue,
+      p_customer_name: saleCustomer || 'Walk-in',
+      p_payment_status: salePaymentStatus,
+      p_payment_method: salePaymentStatus === 'unpaid' ? null : salePaymentMethod
     };
 
     try {
-      const { data, error: err } = await supabase.from('sales_entries').insert([newSale]).select().single();
+      const { data, error: err } = await supabase.rpc('record_sale', rpcArgs);
       if (err) throw err;
       if (data) setSales([data, ...sales]);
-      setSaleKg('');
+      handleClearSaleForm();
     } catch (err) {
       console.error("Sale error", err);
-      setError(`Sale Error: ${err.message || err.error_description || "Failed to save sale."}`);
+      const msg = err.message || err.error_description || "Failed to save sale.";
+      setError(msg.includes('Insufficient stock') ? msg : `Sale Error: ${msg}`);
     } finally {
       setIsSavingSale(false);
     }
+  };
+
+  const handleClearSaleForm = () => {
+    setSaleKg('');
+    setSaleCustomer('');
+    setSalePaymentStatus('paid');
+    setSalePaymentMethod('cash');
   };
 
   const handleAddProduction = async (e) => {
@@ -245,6 +267,26 @@ function App() {
     }
   };
 
+  const handleMarkAsPaid = async (id) => {
+    if (viewMode !== 'daily') return;
+    setError(null);
+    try {
+      const { data, error: err } = await supabase
+        .from('sales_entries')
+        .update({ payment_status: 'paid', payment_method: 'cash' })
+        .eq('id', id)
+        .select()
+        .single();
+      if (err) throw err;
+      if (data) {
+        setSales(sales.map(s => s.id === id ? data : s));
+      }
+    } catch (err) {
+      console.error("Update error", err);
+      setError("Failed to mark sale as paid.");
+    }
+  };
+
   const handleDeleteProduction = async (id) => {
     if (viewMode !== 'daily') return;
     if (!window.confirm("Are you sure you want to delete this production entry? This cannot be undone.")) return;
@@ -257,6 +299,47 @@ function App() {
     } catch (err) {
       console.error("Delete error", err);
       setError("Failed to delete production.");
+    }
+  };
+
+  const handleAddExpense = async (e) => {
+    e.preventDefault();
+    if (!expenseDesc || !expenseAmount || Number(expenseAmount) <= 0 || viewMode !== 'daily' || isSavingExpense) return;
+    
+    setError(null);
+    setIsSavingExpense(true);
+    const newExp = {
+      date: format(selectedDate, 'yyyy-MM-dd'),
+      description: expenseDesc,
+      amount: Number(expenseAmount)
+    };
+
+    try {
+      const { data, error: err } = await supabase.from('expenses').insert([newExp]).select().single();
+      if (err) throw err;
+      if (data) setExpenses([data, ...expenses]);
+      setExpenseDesc('');
+      setExpenseAmount('');
+    } catch (err) {
+      console.error("Expense error", err);
+      setError(`Expense Error: ${err.message || err.error_description || "Failed to save expense."}`);
+    } finally {
+      setIsSavingExpense(false);
+    }
+  };
+
+  const handleDeleteExpense = async (id) => {
+    if (viewMode !== 'daily') return;
+    if (!window.confirm("Are you sure you want to delete this expense? This cannot be undone.")) return;
+    
+    setError(null);
+    try {
+      const { error: err } = await supabase.from('expenses').delete().eq('id', id);
+      if (err) throw err;
+      setExpenses(expenses.filter(e => e.id !== id));
+    } catch (err) {
+      console.error("Delete error", err);
+      setError("Failed to delete expense.");
     }
   };
 
@@ -294,13 +377,15 @@ function App() {
       const dateStr = format(day, 'yyyy-MM-dd');
       const daySales = sales.filter(s => s.date === dateStr);
       const dayProd = production.filter(p => p.date === dateStr);
+      const dayExp = expenses.filter(e => e.date === dateStr);
       const pTotal = dayProd.reduce((acc, p) => acc + Number(p.kg_produced), 0);
       const sTotal = daySales.reduce((acc, s) => acc + Number(s.kg), 0);
-      const rev = daySales.reduce((acc, s) => acc + Number(s.revenue), 0);
-      const cost = daySales.reduce((acc, s) => acc + (Number(s.kg) * Number(s.cost_per_kg)), 0);
-      const prof = rev - cost;
-      if (pTotal === 0 && sTotal === 0) return null; 
-      return { date: day, produced: pTotal, sold: sTotal, revenue: rev, profit: prof };
+      const rev = roundCurrency(daySales.reduce((acc, s) => acc + Number(s.revenue), 0));
+      const cost = roundCurrency(daySales.reduce((acc, s) => acc + (Number(s.kg) * Number(s.cost_per_kg)), 0));
+      const expTotal = roundCurrency(dayExp.reduce((acc, e) => acc + Number(e.amount), 0));
+      const prof = roundCurrency(rev - cost - expTotal);
+      if (pTotal === 0 && sTotal === 0 && expTotal === 0) return null; 
+      return { date: day, produced: pTotal, sold: sTotal, revenue: rev, expenses: expTotal, profit: prof };
     }).filter(Boolean); 
   };
 
@@ -324,24 +409,29 @@ function App() {
       // Fetch all historical records to allow backtracking everything
       const { data: allSales, error: salesErr } = await supabase.from('sales_entries').select('*');
       const { data: allProd, error: prodErr } = await supabase.from('production_entries').select('*');
+      const { data: allExp, error: expErr } = await supabase.from('expenses').select('*');
       if (salesErr) throw salesErr;
       if (prodErr) throw prodErr;
+      if (expErr) throw expErr;
 
-      const headers = ['Date', 'Time', 'Type', 'Amount (kg)', 'Revenue/Cost', 'Price per kg'];
+      const headers = ['Date', 'Time', 'Type', 'Amount (kg/Qty)', 'Revenue/Cost', 'Price per kg/Desc', 'Customer', 'Payment Status', 'Payment Method'];
       const rows = [];
       
       const combined = [
         ...(allSales || []).map(s => ({ ...s, _sortDate: new Date(s.created_at), _type: 'sale' })),
-        ...(allProd || []).map(p => ({ ...p, _sortDate: new Date(p.created_at), _type: 'production' }))
+        ...(allProd || []).map(p => ({ ...p, _sortDate: new Date(p.created_at), _type: 'production' })),
+        ...(allExp || []).map(e => ({ ...e, _sortDate: new Date(e.created_at), _type: 'expense' }))
       ].sort((a, b) => b._sortDate - a._sortDate);
 
       combined.forEach(entry => {
-        const date = format(entry._sortDate, 'yyyy-MM-dd');
+        const date = format(new Date(entry.date + 'T00:00:00'), 'yyyy-MM-dd');
         const time = format(entry._sortDate, 'hh:mm a');
         if (entry._type === 'sale') {
-          rows.push([date, time, `Sale (${entry.sale_type})`, `-${entry.kg}`, `₱${entry.revenue}`, `₱${entry.price_per_kg}`]);
+          rows.push([date, time, `Sale (${entry.sale_type})`, `-${entry.kg}`, `₱${entry.revenue}`, `₱${entry.price_per_kg}`, entry.customer_name || 'Walk-in', entry.payment_status?.toUpperCase(), entry.payment_method?.toUpperCase() || '-']);
+        } else if (entry._type === 'production') {
+          rows.push([date, time, 'Production', `+${entry.kg_produced}`, '-', '-', '-', '-', '-']);
         } else {
-          rows.push([date, time, 'Production', `+${entry.kg_produced}`, '-', '-']);
+          rows.push([date, time, 'Expense', '-', `-₱${entry.amount}`, `"${entry.description}"`, '-', '-', '-']);
         }
       });
 
@@ -358,20 +448,25 @@ function App() {
       // Fetch all historical records
       const { data: allSales, error: salesErr } = await supabase.from('sales_entries').select('*');
       const { data: allProd, error: prodErr } = await supabase.from('production_entries').select('*');
+      const { data: allExp, error: expErr } = await supabase.from('expenses').select('*');
       if (salesErr) throw salesErr;
       if (prodErr) throw prodErr;
+      if (expErr) throw expErr;
 
       const safeSales = allSales || [];
       const safeProd = allProd || [];
+      const safeExp = allExp || [];
 
-      if (!safeSales.length && !safeProd.length) {
+      if (!safeSales.length && !safeProd.length && !safeExp.length) {
         setError("No records to export.");
         return;
       }
       
+      const parseLocal = (dStr) => { const [y, m, d] = dStr.split('-'); return new Date(y, m-1, d); };
       const allDates = [
-        ...safeSales.map(s => new Date(s.date)), 
-        ...safeProd.map(p => new Date(p.date))
+        ...safeSales.map(s => parseLocal(s.date)), 
+        ...safeProd.map(p => parseLocal(p.date)),
+        ...safeExp.map(e => parseLocal(e.date))
       ];
       
       const minDate = new Date(Math.min(...allDates));
@@ -383,22 +478,29 @@ function App() {
         const dateStr = format(day, 'yyyy-MM-dd');
         const daySales = safeSales.filter(s => s.date === dateStr);
         const dayProd = safeProd.filter(p => p.date === dateStr);
+        const dayExp = safeExp.filter(e => e.date === dateStr);
         const pTotal = dayProd.reduce((acc, p) => acc + Number(p.kg_produced), 0);
         const sTotal = daySales.reduce((acc, s) => acc + Number(s.kg), 0);
-        const rev = daySales.reduce((acc, s) => acc + Number(s.revenue), 0);
-        const cost = daySales.reduce((acc, s) => acc + (Number(s.kg) * Number(s.cost_per_kg)), 0);
-        const prof = rev - cost;
-        if (pTotal === 0 && sTotal === 0) return null; 
-        return { date: day, produced: pTotal, sold: sTotal, revenue: rev, profit: prof };
+        const rev = roundCurrency(daySales.reduce((acc, s) => acc + Number(s.revenue), 0));
+        const collected = roundCurrency(daySales.filter(s => s.payment_status === 'paid').reduce((acc, s) => acc + Number(s.revenue), 0));
+        const unpaid = roundCurrency(daySales.filter(s => s.payment_status === 'unpaid').reduce((acc, s) => acc + Number(s.revenue), 0));
+        const cost = roundCurrency(daySales.reduce((acc, s) => acc + (Number(s.kg) * Number(s.cost_per_kg)), 0));
+        const expTotal = roundCurrency(dayExp.reduce((acc, e) => acc + Number(e.amount), 0));
+        const prof = roundCurrency(rev - cost - expTotal);
+        if (pTotal === 0 && sTotal === 0 && expTotal === 0) return null; 
+        return { date: day, produced: pTotal, sold: sTotal, revenue: rev, collected, unpaid, expenses: expTotal, profit: prof };
       }).filter(Boolean);
 
-      const headers = ['Date', 'Produced (kg)', 'Sold (kg)', 'Revenue', 'Profit'];
+      const headers = ['Date', 'Produced (kg)', 'Sold (kg)', 'Total Revenue', 'Collected (Paid)', 'Unpaid (Credit)', 'Expenses', 'Net Profit'];
       const rows = aggregate.map(row => {
         return [
           format(row.date, 'yyyy-MM-dd'),
           row.produced,
           row.sold,
           `₱${row.revenue}`,
+          `₱${row.collected}`,
+          `₱${row.unpaid}`,
+          `₱${row.expenses}`,
           `₱${row.profit}`
         ];
       });
@@ -548,8 +650,25 @@ function App() {
       {/* PRIMARY ACTION: LOG SALE */}
       {viewMode === 'daily' && !isLoading && (
         <form className="card" onSubmit={handleAddSale} style={{ border: '2px solid var(--primary-color)', boxShadow: 'var(--shadow-md)' }}>
-          <div className="card-header" style={{ color: 'var(--primary-color)' }}>Record a Sale</div>
-          <div className="form-group">
+          <div className="card-header" style={{ color: 'var(--primary-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>Record a Sale</span>
+            <button type="button" className="btn-text" onClick={handleClearSaleForm} style={{ fontSize: '0.875rem', color: 'var(--text-tertiary)' }}>
+              Clear
+            </button>
+          </div>
+          
+          <div className="form-group" style={{ marginBottom: '12px' }}>
+            <input 
+              type="text" 
+              className="form-control" 
+              placeholder="Customer Name (Optional)"
+              value={saleCustomer}
+              onChange={(e) => setSaleCustomer(e.target.value)}
+              disabled={isSavingSale}
+            />
+          </div>
+
+          <div className="form-group" style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
             <input 
               type="number" 
               className="form-control mono" 
@@ -561,28 +680,68 @@ function App() {
               autoFocus
               required
               disabled={isSavingSale}
+              style={{ flex: 1, fontSize: '1.25rem' }}
             />
+            <div style={{ display: 'flex', gap: '8px', flex: 1 }}>
+              <button 
+                type="button" 
+                className={`btn btn-outline ${saleType === 'pickup' ? 'active' : ''}`} 
+                style={{ flex: 1, padding: '12px 8px' }}
+                onClick={() => setSaleType('pickup')}
+                disabled={isSavingSale}
+              >
+                Pickup
+              </button>
+              <button 
+                type="button" 
+                className={`btn btn-outline ${saleType === 'delivery' ? 'active' : ''}`} 
+                style={{ flex: 1, padding: '12px 8px' }}
+                onClick={() => setSaleType('delivery')}
+                disabled={isSavingSale}
+              >
+                Delivery
+              </button>
+            </div>
           </div>
-          <div className="form-group" style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
+
+          <div className="form-group" style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
             <button 
               type="button" 
-              className={`btn btn-outline ${saleType === 'pickup' ? 'active' : ''}`} 
-              style={{ flex: 1, padding: '16px 8px' }}
-              onClick={() => setSaleType('pickup')}
+              className={`btn btn-outline ${salePaymentStatus === 'paid' ? 'active' : ''}`} 
+              style={{ flex: 1 }}
+              onClick={() => setSalePaymentStatus('paid')}
               disabled={isSavingSale}
             >
-              Pickup
+              Paid
             </button>
             <button 
               type="button" 
-              className={`btn btn-outline ${saleType === 'delivery' ? 'active' : ''}`} 
-              style={{ flex: 1, padding: '16px 8px' }}
-              onClick={() => setSaleType('delivery')}
+              className={`btn btn-outline ${salePaymentStatus === 'unpaid' ? 'active' : ''}`} 
+              style={{ flex: 1 }}
+              onClick={() => setSalePaymentStatus('unpaid')}
               disabled={isSavingSale}
             >
-              Delivery
+              Unpaid (Credit)
             </button>
           </div>
+
+          {salePaymentStatus === 'paid' && (
+            <div className="form-group" style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+              {['cash', 'gcash', 'bank'].map(method => (
+                <button 
+                  key={method}
+                  type="button" 
+                  className={`btn btn-outline ${salePaymentMethod === method ? 'active' : ''}`} 
+                  style={{ flex: 1, fontSize: '0.875rem' }}
+                  onClick={() => setSalePaymentMethod(method)}
+                  disabled={isSavingSale}
+                >
+                  {method.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          )}
+
           <button type="submit" className="btn btn-primary" style={{ width: '100%', padding: '18px', fontSize: '1.125rem' }} disabled={isSavingSale}>
             {isSavingSale ? 'Saving...' : <><Plus size={20} /> Record ₱{((Number(saleKg) || 0) * (saleType === 'pickup' ? settings.pickup_price : settings.delivery_price)).toLocaleString()}</>}
           </button>
@@ -608,6 +767,40 @@ function App() {
             />
             <button type="submit" className="btn btn-outline" style={{ whiteSpace: 'nowrap' }} disabled={isSavingProd}>
               {isSavingProd ? 'Saving...' : <><Plus size={20} /> Add</>}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* TERTIARY ACTION: LOG EXPENSE */}
+      {viewMode === 'daily' && !isLoading && (
+        <form className="card" onSubmit={handleAddExpense}>
+          <div className="card-header">Log Expense</div>
+          <div style={{ display: 'flex', gap: '12px' }}>
+            <input 
+              type="text" 
+              className="form-control" 
+              placeholder="Description (e.g. Fuel)"
+              value={expenseDesc}
+              onChange={(e) => setExpenseDesc(e.target.value)}
+              style={{ padding: '12px', fontSize: '1.25rem', flex: 2 }}
+              required
+              disabled={isSavingExpense}
+            />
+            <input 
+              type="number" 
+              className="form-control mono" 
+              placeholder="Amount (₱)"
+              value={expenseAmount}
+              onChange={(e) => setExpenseAmount(e.target.value)}
+              min="0"
+              step="any"
+              style={{ padding: '12px', fontSize: '1.25rem', flex: 1, minWidth: '110px' }}
+              required
+              disabled={isSavingExpense}
+            />
+            <button type="submit" className="btn btn-outline" style={{ whiteSpace: 'nowrap' }} disabled={isSavingExpense}>
+              {isSavingExpense ? 'Saving...' : <><Plus size={20} /> Add</>}
             </button>
           </div>
         </form>
@@ -647,9 +840,23 @@ function App() {
                 <span className="ledger-label">Total Revenue</span>
                 <span className="ledger-value mono">₱{revenueTotal.toLocaleString()}</span>
               </div>
+              <div className="ledger-item" style={{ display: 'flex', gap: '16px', gridColumn: 'span 2', background: 'var(--surface-color)', padding: '12px', borderRadius: '8px' }}>
+                <div style={{ flex: 1 }}>
+                  <span className="ledger-label" style={{ fontSize: '0.75rem' }}>Collected (Paid)</span>
+                  <span className="ledger-value mono positive" style={{ fontSize: '1rem' }}>₱{collectedTotal.toLocaleString()}</span>
+                </div>
+                <div style={{ flex: 1, borderLeft: '1px solid var(--border-color)', paddingLeft: '16px' }}>
+                  <span className="ledger-label" style={{ fontSize: '0.75rem' }}>Unpaid (Utang)</span>
+                  <span className="ledger-value mono negative" style={{ fontSize: '1rem' }}>₱{unpaidTotal.toLocaleString()}</span>
+                </div>
+              </div>
               <div className="ledger-item">
                 <span className="ledger-label">Total Est. Cost</span>
                 <span className="ledger-value mono" style={{ color: 'var(--text-secondary)' }}>₱{costTotal.toLocaleString()}</span>
+              </div>
+              <div className="ledger-item">
+                <span className="ledger-label">Total Expenses</span>
+                <span className="ledger-value mono negative">-₱{expensesTotal.toLocaleString()}</span>
               </div>
             </div>
           )}
@@ -668,6 +875,7 @@ function App() {
                   <th>Prod</th>
                   <th>Sold</th>
                   <th>Rev.</th>
+                  <th>Exp.</th>
                   <th>Profit</th>
                 </tr>
               </thead>
@@ -678,12 +886,13 @@ function App() {
                     <td className="mono">{row.produced > 0 ? `+${row.produced}` : '-'}</td>
                     <td className="mono">{row.sold > 0 ? `-${row.sold}` : '-'}</td>
                     <td className="mono">₱{row.revenue.toLocaleString()}</td>
+                    <td className="mono negative">{row.expenses > 0 ? `-₱${row.expenses.toLocaleString()}` : '-'}</td>
                     <td className={`mono ${row.profit > 0 ? 'positive' : ''}`}>₱{row.profit.toLocaleString()}</td>
                   </tr>
                 ))}
                 {generateAggregateRows().length === 0 && (
                   <tr>
-                    <td colSpan="5" style={{ textAlign: 'center', color: 'var(--text-tertiary)', padding: '20px' }}>
+                    <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-tertiary)', padding: '20px' }}>
                       No activity in this period.
                     </td>
                   </tr>
@@ -695,21 +904,33 @@ function App() {
       )}
 
       {/* DAILY TRANSACTION LOGS */}
-      {viewMode === 'daily' && !isLoading && (sales.length > 0 || production.length > 0) && (
+      {viewMode === 'daily' && !isLoading && (sales.length > 0 || production.length > 0 || expenses.length > 0) && (
         <section className="card">
           <div className="card-header">Today's Entries</div>
           <ul className="log-list">
             {sales.map(sale => (
               <li key={sale.id} className="log-item">
                 <div className="log-details">
-                  <span className="log-title">Sale ({sale.sale_type})</span>
-                  <span className="log-meta">{format(new Date(sale.created_at), 'h:mm a')} • ₱{Number(sale.price_per_kg).toFixed(2)}/kg</span>
+                  <span className="log-title">Sale ({sale.sale_type}) {sale.customer_name ? `- ${sale.customer_name}` : ''}</span>
+                  <span className="log-meta">
+                    {format(new Date(sale.created_at), 'h:mm a')} • ₱{Number(sale.price_per_kg).toFixed(2)}/kg
+                    {sale.payment_status === 'unpaid' ? (
+                      <span style={{ color: '#dc2626', fontWeight: 'bold', marginLeft: '8px' }}>[UNPAID]</span>
+                    ) : (
+                      <span style={{ color: 'var(--text-tertiary)', marginLeft: '8px' }}>[{sale.payment_method?.toUpperCase() || 'CASH'}]</span>
+                    )}
+                  </span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                   <div className="log-amount">
                     <div className="mono negative">-{sale.kg} kg</div>
                     <div className="mono positive" style={{ fontSize: '0.875rem' }}>+₱{sale.revenue}</div>
                   </div>
+                  {sale.payment_status === 'unpaid' && (
+                    <button className="btn btn-outline" onClick={() => handleMarkAsPaid(sale.id)} style={{ padding: '8px 12px', fontSize: '0.75rem', color: '#059669', borderColor: '#059669' }}>
+                      Mark Paid
+                    </button>
+                  )}
                   <button className="btn btn-danger" onClick={() => handleDeleteSale(sale.id)}>
                     <Trash2 size={20} />
                   </button>
@@ -727,6 +948,22 @@ function App() {
                     <div className="mono positive">+{prod.kg_produced} kg</div>
                   </div>
                   <button className="btn btn-danger" onClick={() => handleDeleteProduction(prod.id)}>
+                    <Trash2 size={20} />
+                  </button>
+                </div>
+              </li>
+            ))}
+            {expenses.map(exp => (
+              <li key={exp.id} className="log-item">
+                <div className="log-details">
+                  <span className="log-title">Expense ({exp.description})</span>
+                  <span className="log-meta">{format(new Date(exp.created_at), 'h:mm a')}</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <div className="log-amount">
+                    <div className="mono negative">-₱{exp.amount}</div>
+                  </div>
+                  <button className="btn btn-danger" onClick={() => handleDeleteExpense(exp.id)}>
                     <Trash2 size={20} />
                   </button>
                 </div>
